@@ -34,7 +34,7 @@ char* log_gettime()
 	return buf;
 }
 
-void log(char* fmt, ...)
+void log(const char* fmt, ...)
 {
 #ifndef LOG_DISABLE
 	// Add timestamp
@@ -48,7 +48,7 @@ void log(char* fmt, ...)
 #endif
 }
 
-void log_error(char* fmt, ...)
+void log_error(const char* fmt, ...)
 {
 #ifndef LOG_DISABLE
 	// Add timestamp

@@ -6,5 +6,5 @@
 
 #pragma once
 
-void log(char* fmt, ...);
-void log_error(char* fmt, ...);
+void log(const char* fmt, ...);
+void log_error(const char* fmt, ...);
