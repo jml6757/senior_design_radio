@@ -10,7 +10,7 @@
 
 SRCS = $(wildcard *.cpp)
 OBJS = $(SRCS:.cpp=.o)
-BIN  = transfer
+BIN  = radio_tx
 
 CFLAGS  = -g -O2 -Wall
 

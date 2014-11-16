@@ -12,7 +12,7 @@
 /******************************************************************************
  * Radio functions
  *****************************************************************************/
-int radio_open(void);
+int radio_open(const char* device);
 void radio_config(int fd, int baud);
 int radio_data_send(int fd, uint8_t* data, int size);
 int radio_data_receive(int fd, uint8_t* data);

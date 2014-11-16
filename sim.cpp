@@ -101,7 +101,7 @@ int sim_tcp_client_socket(const char* ip)
     /* Create destination address */
     memset(&serv_addr, '0', sizeof(serv_addr)); 
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(5000); 
+    serv_addr.sin_port = htons(SIM_PORT); 
     if(inet_pton(AF_INET, ip, &serv_addr.sin_addr)<=0)
     {
         log_error("Address conversion");

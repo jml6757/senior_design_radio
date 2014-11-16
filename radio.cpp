@@ -8,26 +8,30 @@
 
 #include "packet.h"
 #include "radio.h"
+#include "log.h"
 
 /******************************************************************************
- * Opens a file descriptor to the radio device. The device name is hardcoded
- * since it will always be the same.
+ * Opens a file descriptor to the radio device. Radio device name is passed
+ * in as the argument since these could be different for the beagleboard and
+ * the base station.
  *
  * @return    The file descriptor to the radio device
  *****************************************************************************/
-int radio_open(void)
+int radio_open(const char* device)
 {
 	int fd;
-	fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_NDELAY);
+	fd = open(device, O_RDWR | O_NOCTTY | O_NDELAY);
 	if (fd == -1)
 	{
-		perror("Unable to open /dev/ttyO0 - ");
+		log_error("Unable to open %s", device);
 		exit(1);
 	}
 	else
 	{
 		fcntl(fd, F_SETFL, 1); // Use blocking behavior
 	}
+
+	log("Radio Device Opened.\n");
 	return (fd);
 
 }
@@ -68,6 +72,8 @@ void radio_config(int fd, int baud)
 
 	// Set the attributes
 	tcsetattr(fd, TCSANOW, &options);
+
+	log("Radio Configured.\n");
 }
 
 /******************************************************************************
@@ -92,6 +98,7 @@ int radio_data_send(int fd, uint8_t* data, int size)
 	int n;
 
 	// Send chunks
+	log("Starting packet writing...\n");
 	for(int i = 0; i < num_packets; ++i)
 	{
 		// Ensure correct data size when at the end of data
@@ -106,10 +113,11 @@ int radio_data_send(int fd, uint8_t* data, int size)
 		// Send the packet and wait for an ACK
 		int ack_received = 0;
 		while(ack_received == 0)
-		{
+		{			
 			// Send the data chunk
 			n = write(fd, write_buf, packet_size);
-			
+			log("Wrote data chunk - %d of %d (%d Bytes).\n", i+1, num_packets, n);
+
 			// Retry on error
 			if(n != packet_size) continue;
 
@@ -124,18 +132,22 @@ int radio_data_send(int fd, uint8_t* data, int size)
 				switch(packet->type)
 				{
 					case ITP_TYPE_DATA_ACK:
+						log("ACK Recieved.\n");
 						ack_received = 1;
 						break;
 				
 					case ITP_TYPE_DATA_NACK:
+						log("NACK Recieved. Retry...\n");
 						continue; // Attempt again
 
 					case ITP_TYPE_DATA_ERR:
+						log("Error Recieved. Exiting.\n");
 						return -1; // Irrecoverable
 				}
 			}
 		}
 	}
+	log("Writing Complete.\n");
 	return 0;
 }
 
@@ -164,11 +176,12 @@ int radio_data_receive(int fd, uint8_t* data)
 	uint8_t* data_ptr = data;
 
 	// Loop until all packets have been received
-	while(current < final)
+	log("Starting packet reading...\n");
+	while(current != final)
 	{
 		// Attempt to recieve buffer
 		n = read(fd, read_buf, MAX_BUFFER_SIZE);
-
+		
 		// Check that you got the correct number of bytes and correct checksum
 		packet = (struct packet*) read_buf;
 		if(packet_verify_format(packet, n) == 1)
@@ -179,6 +192,8 @@ int radio_data_receive(int fd, uint8_t* data)
 				final = packet->total;
 			}
 
+			log("Read data chunk - %d of %d (%d Bytes).\n", current+1, final, n);
+
 			// If the sequence number is too large, inform that you did not receive the current packet
 			if(packet->seqnum > current)
 			{
@@ -187,6 +202,7 @@ int radio_data_receive(int fd, uint8_t* data)
 				continue;
 			}
 
+			log("Writing ACK.\n");
 			// Sent acknowledgement of current packet (This must send even if a redundant packet was sent)
 			int packet_size = packet_data_ack_create(write_buf, packet->seqnum, final);
 			n = write(fd, write_buf, packet_size);
@@ -207,11 +223,13 @@ int radio_data_receive(int fd, uint8_t* data)
 		}
 		else
 		{
+			log("Invalid Packet. NACK and Retry...\n");
 			// When packet is ill-formatted, send NACK
 			int packet_size = packet_data_nack_create(write_buf, current, final);
 			n = write(fd, write_buf, packet_size);
 		}
 	}
 	
+	log("Reading Complete.\n");
 	return data_ptr - data;
 }
