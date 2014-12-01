@@ -5,6 +5,7 @@
 #include <stdlib.h>  /* Used for exiting */
 #include <stdio.h>   /* Printing functions */
 #include <string.h>  /* Used for memory copies */
+#include <poll.h>
 
 #include "packet.h"
 #include "radio.h"
@@ -77,7 +78,88 @@ void radio_config(int fd, int baud)
 }
 
 /******************************************************************************
- * Write the data buffer.
+ * Checks to see if data is available to read on the radio device file
+ * descriptor. Allows a time to be specified before giving up. Private.
+ *
+ * @param     fd       The file descriptor to the radio device
+ * @param     timeout  The amount of time to wait for data in milliseconds
+ *
+ * @return    If data is available
+ *****************************************************************************/
+int radio_data_poll(int fd, int timeout)
+{
+	// Poll variables
+	struct pollfd pfd = {fd, POLLIN | POLLPRI, 0}; // Poll file descriptor
+	int n = 0;                                     // Poll return value
+
+	n = poll(&pfd, 1, timeout);
+	if(n == -1)
+	{
+		log_error("Poll failed");
+		return 0;
+	}
+	else if (n == 0)
+	{
+		log("Warning: No Data. Poll timeout.\n");
+		return 0;
+	}
+
+	return 1;
+}
+
+/******************************************************************************
+ * Read radio transmission to a data buffer. Ensures that the packet header is
+ * read at minimum. This makes it so that if bytes are sent in separate
+ * packets, the whole message will be constructed contiguously. Private.
+ *
+ * @param     fd      The file descriptor for the radio device
+ * @param     data    The data buffer to fill
+ *
+ * @return    The number of bytes recieved
+ *****************************************************************************/
+int radio_data_read(int fd, uint8_t* data)
+{
+	int total = 0;                                 // Total bytes received
+	int expected = sizeof(struct packet);          // Bytes expected to be recieved
+	struct packet* packet = (struct packet*) data; // Packet Pointer (For ease of use)
+	int poll_timeout = 100;                        // Amount of time to wait before giving up
+
+	// Read into the data buffer while while we do not have a complete buffer
+	while(total < expected)
+	{
+		if(radio_data_poll(fd, poll_timeout))
+		{
+			total += read(fd, data, MAX_BUFFER_SIZE);
+		}
+		else
+		{
+			return 0; // Polling failed or timed out
+		}
+	}
+
+	// If we are getting data, read the data as well
+	if(packet->type == ITP_TYPE_DATA_SEND)
+	{
+		expected += packet->size - 1;
+		
+		while(total < expected)
+		{
+			if(radio_data_poll(fd, poll_timeout))
+			{
+				total += read(fd, data, MAX_BUFFER_SIZE);
+			}
+			else
+			{
+				return 0; // Polling failed or timed out
+			}
+		}
+	}
+
+	return total;
+}
+
+/******************************************************************************
+ * Write the data buffer in chunks.
  *
  * @param     fd      The file descriptor to the radio device
  * @param     data    The data to send
@@ -90,7 +172,7 @@ int radio_data_send(int fd, uint8_t* data, int size)
 	// Allocate packet buffers
 	uint8_t write_buf[MAX_BUFFER_SIZE] = {0};
 	uint8_t read_buf[MAX_BUFFER_SIZE] = {0};
-	struct packet* packet;
+	struct packet* packet = (struct packet*) read_buf;
 
 	// Determine sizing
 	int data_size = MAX_DATA_SIZE;
@@ -122,10 +204,9 @@ int radio_data_send(int fd, uint8_t* data, int size)
 			if(n != packet_size) continue;
 
 			// Attempt to read ACK packet
-			n = read(fd, read_buf, MAX_BUFFER_SIZE);
+			n = radio_data_read(fd, read_buf);
 			
 			// Check that you got the correct number of bytes and correct checksum
-			packet = (struct packet*) read_buf;
 			if(packet_verify_format(packet, n) == 1)
 			{
 				// Check that it is an ACK and not a NACK
@@ -138,12 +219,21 @@ int radio_data_send(int fd, uint8_t* data, int size)
 				
 					case ITP_TYPE_DATA_NACK:
 						log("NACK Recieved. Retry...\n");
+						// TODO: Set current chunk to be sent to the value found in the NACK packet
 						continue; // Attempt again
 
 					case ITP_TYPE_DATA_ERR:
 						log("Error Recieved. Exiting.\n");
 						return -1; // Irrecoverable
+
+					default:
+						log("Unknown Packet Type: 0x%X. Exiting.\n", packet->type);
+						return -1; // Irrecoverable
 				}
+			}
+			else
+			{
+				log("Invalid Packet Recieved (%d Bytes).\n", n);
 			}
 		}
 	}
@@ -153,7 +243,8 @@ int radio_data_send(int fd, uint8_t* data, int size)
 
 
 /******************************************************************************
- * Read radio transmission to a data buffer.
+ * Read radio transmission chunk data to a data buffer. Image data is
+ * transmitted in chunks in order to ensure data correctness
  *
  * @param     fd      The file descriptor to the radio device
  * @param     data    The data buffer to fill
@@ -165,25 +256,24 @@ int radio_data_receive(int fd, uint8_t* data)
 	// Allocate packet buffers
 	uint8_t write_buf[MAX_BUFFER_SIZE] = {0};
 	uint8_t read_buf[MAX_BUFFER_SIZE] = {0};
-	struct packet* packet;
+	struct packet* packet = (struct packet*) read_buf;
 
 	// Read/Write return values
 	int n;
 
 	// Counters
-	int current = 0; // The current data chunk to receive
-	int final = -1;  // The last data chunk to receive
-	uint8_t* data_ptr = data;
+	int current = 0;          // The current data chunk to receive
+	int final = -1;           // The last data chunk to receive
+	uint8_t* data_ptr = data; // Pointer to the end of the data buffer
 
 	// Loop until all packets have been received
 	log("Starting packet reading...\n");
 	while(current != final)
 	{
 		// Attempt to recieve buffer
-		n = read(fd, read_buf, MAX_BUFFER_SIZE);
+		n = radio_data_read(fd, read_buf);
 		
 		// Check that you got the correct number of bytes and correct checksum
-		packet = (struct packet*) read_buf;
 		if(packet_verify_format(packet, n) == 1)
 		{
 			// Set the final packet number if it has not already been
@@ -197,6 +287,7 @@ int radio_data_receive(int fd, uint8_t* data)
 			// If the sequence number is too large, inform that you did not receive the current packet
 			if(packet->seqnum > current)
 			{
+				log("Incorrect Sequence Number. Writing NACK.\n");
 				int packet_size = packet_data_nack_create(write_buf, current, final);
 				n = write(fd, write_buf, packet_size);
 				continue;
@@ -223,7 +314,7 @@ int radio_data_receive(int fd, uint8_t* data)
 		}
 		else
 		{
-			log("Invalid Packet. NACK and Retry...\n");
+			log("Invalid Packet Recieved (%d Bytes). Writing NACK...\n", n);
 			// When packet is ill-formatted, send NACK
 			int packet_size = packet_data_nack_create(write_buf, current, final);
 			n = write(fd, write_buf, packet_size);
